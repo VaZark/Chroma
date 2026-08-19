@@ -2,14 +2,13 @@
 
 import Clutter from 'gi://Clutter';
 import GObject from 'gi://GObject';
-import St from 'gi://St';
 import GLib from 'gi://GLib';
 import Shell from 'gi://Shell';
 
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
-import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
+import * as QuickSettings from 'resource:///org/gnome/shell/ui/quickSettings.js';
 
 import { DEFAULT_PROFILES } from './profiles.js';
 
@@ -63,28 +62,38 @@ const EFFECT_BC = 'achroma-effect-bc';
 const EFFECT_TINT = 'achroma-effect-tint';
 
 const AchromaIndicator = GObject.registerClass(
-    class AchromaIndicator extends PanelMenu.Button {
+    class AchromaIndicator extends QuickSettings.QuickMenuToggle {
         _init(extensionObject) {
-            super._init(0.0, 'Achroma Toggle');
+          super._init({
+                 title: 'Achroma',
+                 iconName: 'applications-graphics-symbolic',
+                 toggleMode: true,
+             });
 
             this._extensionObject = extensionObject;
             this._settings = extensionObject.getSettings();
-            this._isActive = false; // Start safe
+            this.checked = false; // Start safe
 
-            this._icon = new St.Icon({
-                icon_name: 'applications-graphics-symbolic',
-                style_class: 'system-status-icon',
-            });
+             this.menu.setHeader(
+                 'applications-graphics-symbolic',
+                 'Achroma',
+                 null
+             );
 
-            this.add_child(this._icon);
+             this.connect('clicked', () => {
+                 if (this.checked)
+                     this._refreshEffect();
+                 else
+                     this._disableEffect();
+             });
             this._buildMenu();
 
             // 1. Standard Profile Change
             this._settingsChangedId = this._settings.connect('changed::current-profile', () => {
                 this._updateMenuState();
-                // Only update if we are NOT previewing. 
+                // Only update if we are NOT previewing.
                 // If we are previewing, the preview logic handles the display.
-                if (this._isActive && !this._settings.get_boolean('is-previewing')) {
+                if (this.checked && !this._settings.get_boolean('is-previewing')) {
                     this._refreshEffect();
                 }
             });
@@ -103,7 +112,7 @@ const AchromaIndicator = GObject.registerClass(
                 } else {
                     // Exit Preview Mode -> Revert to state
                     this._disableEffect(); // Clear preview
-                    if (this._isActive) {
+                    if (this.checked) {
                         this._refreshEffect(); // Restore active profile if it was on
                     }
                 }
@@ -131,22 +140,6 @@ const AchromaIndicator = GObject.registerClass(
         _buildMenu() {
             this.menu.removeAll();
 
-            // Toggle
-            this._toggleItem = new PopupMenu.PopupSwitchMenuItem('Enable Effect', this._isActive);
-            this._toggleItem.connect('toggled', (item, state) => {
-                this._isActive = state;
-                if (state) {
-                    this._refreshEffect();
-                    this._icon.add_style_class_name('achroma-active');
-                } else {
-                    this._disableEffect();
-                    this._icon.remove_style_class_name('achroma-active');
-                }
-            });
-            this.menu.addMenuItem(this._toggleItem);
-
-            this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-
             // Header
             const header = new PopupMenu.PopupMenuItem('Select Profile', { reactive: false });
             header.actor.add_style_class_name('popup-subtitle-menu-item');
@@ -163,19 +156,22 @@ const AchromaIndicator = GObject.registerClass(
 
                 item.connect('activate', () => {
                     this._settings.set_string('current-profile', key);
-                    if (!this._isActive) this._toggleItem.setToggleState(true);
+                    if (!this.checked) {
+                        this.checked = true;
+                        this._refreshEffect();
+                    }
                 });
 
                 this._profileItems[key] = item;
                 this.menu.addMenuItem(item);
             }
-
             this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-            const settingsItem = new PopupMenu.PopupMenuItem('Preferences');
-            settingsItem.connect('activate', () => {
-                this._extensionObject.openPreferences();
-            });
-            this.menu.addMenuItem(settingsItem);
+            const settingsItem = this.menu.addAction(
+                'Preferences',
+                () => this._extensionObject.openPreferences()
+            );
+            settingsItem.visible = Main.sessionMode.allowSettings;
+            this.menu._settingsActions[this._extensionObject.uuid] = settingsItem;
         }
 
         _updateMenuState() {
@@ -217,7 +213,7 @@ const AchromaIndicator = GObject.registerClass(
             // 1. Desaturation
             if (profile.factor !== undefined) {
                 // Even if factor is 0, if the user requested it in preview, we apply it.
-                // But optimization: factor 0 desaturate is essentially no-op, 
+                // But optimization: factor 0 desaturate is essentially no-op,
                 // unless we want to ensure chain consistency.
                 if (profile.factor > 0) {
                     const effect = new Clutter.DesaturateEffect({ factor: profile.factor });
@@ -264,16 +260,36 @@ const AchromaIndicator = GObject.registerClass(
         }
     });
 
-export default class AchromaExtension extends Extension {
-    enable() {
-        this._indicator = new AchromaIndicator(this);
-        Main.panel.addToStatusArea('achroma-toggle', this._indicator);
-    }
+const AchromaSystemIndicator = GObject.registerClass(
+    class AchromaSystemIndicator extends QuickSettings.SystemIndicator {
+        _init(extensionObject) {
+            super._init();
 
-    disable() {
-        if (this._indicator) {
-            this._indicator.destroy();
-            this._indicator = null;
+            this._toggle = new AchromaIndicator(extensionObject);
+            this.quickSettingsItems.push(this._toggle);
         }
+
+        destroy() {
+            this.quickSettingsItems.forEach(item => item.destroy());
+            this.quickSettingsItems.length = 0;
+
+            super.destroy();
+        }
+    });
+
+export default class AchromaExtension extends Extension {
+  enable() {
+      this._indicator = new AchromaSystemIndicator(this);
+
+      Main.panel.statusArea.quickSettings.addExternalIndicator(
+          this._indicator
+      );
+  }
+
+  disable() {
+    if (this._indicator) {
+        this._indicator.destroy();
+        this._indicator = null;
     }
+  }
 }
