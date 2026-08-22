@@ -140,12 +140,7 @@ const AchromaIndicator = GObject.registerClass(
         _buildMenu() {
             this.menu.removeAll();
 
-            // Header
-            const header = new PopupMenu.PopupMenuItem('Select Profile', { reactive: false });
-            header.actor.add_style_class_name('popup-subtitle-menu-item');
-            this.menu.addMenuItem(header);
-
-            // Profiles
+          // Profiles
             const profiles = this._getAllProfiles();
             const currentProfileKey = this._settings.get_string('current-profile');
             this._profileItems = {};
