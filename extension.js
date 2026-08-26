@@ -257,34 +257,32 @@ const AchromaIndicator = GObject.registerClass(
 
 const AchromaSystemIndicator = GObject.registerClass(
     class AchromaSystemIndicator extends QuickSettings.SystemIndicator {
-        _init(extensionObject) {
-            super._init();
 
-            this._toggle = new AchromaIndicator(extensionObject);
-            this.quickSettingsItems.push(this._toggle);
-        }
-
-        destroy() {
-            this.quickSettingsItems.forEach(item => item.destroy());
-            this.quickSettingsItems.length = 0;
-
-            super.destroy();
-        }
+      constructor(extensionObject) {
+          super();
+          this._indicator = this._addIndicator();
+          this._indicator.iconName = 'applications-graphics-symbolic';
+          const toggle = new AchromaIndicator(extensionObject);
+          toggle.bind_property(
+              'checked',
+              this._indicator,
+              'visible',
+              GObject.BindingFlags.SYNC_CREATE
+          );
+          this.quickSettingsItems.push(toggle);
+      }
     });
 
 export default class AchromaExtension extends Extension {
   enable() {
       this._indicator = new AchromaSystemIndicator(this);
-
       Main.panel.statusArea.quickSettings.addExternalIndicator(
           this._indicator
       );
   }
 
   disable() {
-    if (this._indicator) {
-        this._indicator.destroy();
-        this._indicator = null;
-    }
+    this._indicator.quickSettingsItems.forEach(item => item.destroy());
+    this._indicator.destroy();
   }
 }
