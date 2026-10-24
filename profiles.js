@@ -14,3 +14,14 @@ export const DEFAULT_PROFILES = {
     'low-brightness': { name: 'Low Brightness', factor: 1.0, brightness: -0.2, type: 'preset' },
     'sepia': { name: 'Sepia', factor: 0.8, tint: { r: 255, g: 220, b: 180, a: 40 }, type: 'preset' }
 };
+
+// Near the extremes brightness/contrast crush the screen to solid black or
+// white, leaving nothing visible to correct, so the user could not undo a
+// change. Brightness shifts every pixel equally and blanks the screen much
+// sooner than contrast does, hence its tighter cap.
+export const BRIGHTNESS_LIMIT = 0.6;
+export const CONTRAST_LIMIT = 0.9;
+
+// Tint intensity is a blend factor out of 255. At the top it replaces the
+// screen with a flat colour, so it is capped well short of that.
+export const TINT_INTENSITY_LIMIT = 150;

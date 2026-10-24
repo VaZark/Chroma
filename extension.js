@@ -11,7 +11,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import * as QuickSettings from 'resource:///org/gnome/shell/ui/quickSettings.js';
 
-import { DEFAULT_PROFILES } from './profiles.js';
+import { DEFAULT_PROFILES, BRIGHTNESS_LIMIT, CONTRAST_LIMIT, TINT_INTENSITY_LIMIT } from './profiles.js';
 
 const ICON_NAME = 'applications-graphics-symbolic';
 const FALLBACK_PROFILE_ID = 'grayscale';
@@ -31,25 +31,44 @@ const BRIGHTNESS_CONTRAST_EPSILON = 0.001;
  * Clutter has no built-in tint effect, and a plain overlay would wash out
  * blacks. Mixing in the shader keeps the original luminance. The tint is
  * premultiplied by the pixel's alpha so transparent pixels stay transparent.
+ *
+ * The snippet is compiled once per class and shared by every instance, so the
+ * colour and intensity must be passed as uniforms. Baking them into the
+ * snippet text would freeze the first values ever used, and later changes
+ * (such as the intensity slider) would have no visible effect.
  */
 const TintEffect = GObject.registerClass(
     class TintEffect extends Clutter.ShaderEffect {
         _init({ tint }) {
-            const channel = value => (value / 255.0).toFixed(6);
-            const snippet = Cogl.Snippet.new(
-                Cogl.SnippetHook.FRAGMENT,
-                '',
-                `cogl_color_out.rgb = mix(
-                    cogl_color_out.rgb,
-                    vec3(${channel(tint.r)}, ${channel(tint.g)}, ${channel(tint.b)}) * cogl_color_out.a,
-                    ${channel(tint.a)});`
-            );
             super._init();
-            this._snippet = snippet;
+            this._setFloatUniform('tint_r', tint.r / 255);
+            this._setFloatUniform('tint_g', tint.g / 255);
+            this._setFloatUniform('tint_b', tint.b / 255);
+            this._setFloatUniform('tint_amount', tint.a / 255);
+        }
+
+        _setFloatUniform(name, value) {
+            const uniform = new GObject.Value();
+            uniform.init(GObject.TYPE_FLOAT);
+            uniform.set_float(value);
+            this.set_uniform_value(name, uniform);
         }
 
         vfunc_get_static_snippet() {
-            return this._snippet;
+            if (!TintEffect._snippet) {
+                TintEffect._snippet = Cogl.Snippet.new(
+                    Cogl.SnippetHook.FRAGMENT,
+                    `uniform float tint_r;
+                     uniform float tint_g;
+                     uniform float tint_b;
+                     uniform float tint_amount;`,
+                    `cogl_color_out.rgb = mix(
+                        cogl_color_out.rgb,
+                        vec3(tint_r, tint_g, tint_b) * cogl_color_out.a,
+                        tint_amount);`
+                );
+            }
+            return TintEffect._snippet;
         }
     });
 
@@ -253,8 +272,10 @@ const AchromaToggle = GObject.registerClass(
                 );
             }
 
-            const brightness = profile.brightness || 0;
-            const contrast = profile.contrast || 0;
+            // Clamped here as well as in preferences, because saved or
+            // hand-edited profiles can hold values the UI would never allow.
+            const brightness = Math.clamp(profile.brightness || 0, -BRIGHTNESS_LIMIT, BRIGHTNESS_LIMIT);
+            const contrast = Math.clamp(profile.contrast || 0, -CONTRAST_LIMIT, CONTRAST_LIMIT);
             if (Math.abs(brightness) > BRIGHTNESS_CONTRAST_EPSILON ||
                 Math.abs(contrast) > BRIGHTNESS_CONTRAST_EPSILON) {
                 const effect = new Clutter.BrightnessContrastEffect();
@@ -264,10 +285,8 @@ const AchromaToggle = GObject.registerClass(
             }
 
             if (profile.tint && profile.tint.a > 0) {
-                uiGroup.add_effect_with_name(
-                    EFFECT_TINT,
-                    new TintEffect({ tint: profile.tint })
-                );
+                const tint = { ...profile.tint, a: Math.min(profile.tint.a, TINT_INTENSITY_LIMIT) };
+                uiGroup.add_effect_with_name(EFFECT_TINT, new TintEffect({ tint }));
             }
         }
 

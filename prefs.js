@@ -7,7 +7,7 @@ import GLib from 'gi://GLib';
 
 import { ExtensionPreferences } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
-import { DEFAULT_PROFILES } from './profiles.js';
+import { DEFAULT_PROFILES, BRIGHTNESS_LIMIT, CONTRAST_LIMIT, TINT_INTENSITY_LIMIT } from './profiles.js';
 
 // Slider drags fire many events per second and every preview update is a
 // settings write the shell must react to, so updates are batched.
@@ -234,8 +234,8 @@ export default class AchromaPreferences extends ExtensionPreferences {
         container.append(saturationGroup);
 
         const exposureGroup = new Adw.PreferencesGroup({ title: 'Exposure' });
-        const brightness = this._createSliderRow('Brightness', { min: -1, max: 1, step: 0.05, value: 0 });
-        const contrast = this._createSliderRow('Contrast', { min: -1, max: 1, step: 0.05, value: 0 });
+        const brightness = this._createSliderRow('Brightness', { min: -BRIGHTNESS_LIMIT, max: BRIGHTNESS_LIMIT, step: 0.05, value: 0 });
+        const contrast = this._createSliderRow('Contrast', { min: -CONTRAST_LIMIT, max: CONTRAST_LIMIT, step: 0.05, value: 0 });
         exposureGroup.add(brightness.row);
         exposureGroup.add(contrast.row);
         container.append(exposureGroup);
@@ -244,7 +244,7 @@ export default class AchromaPreferences extends ExtensionPreferences {
         const tintSwitch = new Adw.SwitchRow({ title: 'Enable Color Tint' });
         const tintColor = this._createTintColorRow();
         const tintIntensity = this._createSliderRow('Tint Intensity', {
-            min: 0, max: 255, step: 5, value: DEFAULT_TINT_INTENSITY,
+            min: 0, max: TINT_INTENSITY_LIMIT, step: 5, value: DEFAULT_TINT_INTENSITY,
         });
         tintGroup.add(tintSwitch);
         tintGroup.add(tintColor.row);
