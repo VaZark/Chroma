@@ -3,6 +3,7 @@
 import Clutter from 'gi://Clutter';
 import GObject from 'gi://GObject';
 import Cogl from 'gi://Cogl';
+import St from 'gi://St';
 
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -126,7 +127,15 @@ const AchromaIndicator = GObject.registerClass(
 
             for (const [key, profile] of Object.entries(profiles)) {
                 const item = new PopupMenu.PopupMenuItem(profile.name);
-                if (key === currentProfileKey) item.setOrnament(PopupMenu.Ornament.DOT);
+                item._selectedIcon = new St.Icon({
+                    style_class: 'popup-menu-icon',
+                    icon_name: 'object-select-symbolic',
+                    x_align: Clutter.ActorAlign.END,
+                    x_expand: true,
+                    y_align: Clutter.ActorAlign.CENTER,
+                    visible: key === currentProfileKey,
+                });
+                item.add_child(item._selectedIcon);
 
                 item.connect('activate', () => {
                     this._settings.set_string('current-profile', key);
@@ -151,7 +160,7 @@ const AchromaIndicator = GObject.registerClass(
         _updateMenuState() {
             const currentProfileKey = this._settings.get_string('current-profile');
             for (const [key, item] of Object.entries(this._profileItems || {})) {
-                item.setOrnament(key === currentProfileKey ? PopupMenu.Ornament.DOT : PopupMenu.Ornament.NONE);
+                item._selectedIcon.visible = key === currentProfileKey;
             }
         }
 
