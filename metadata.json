@@ -4,10 +4,9 @@
   "name": "Achroma",
   "settings-schema": "org.gnome.shell.extensions.achroma",
   "shell-version": [
-    "49",
-    "50"
+    "51"
   ],
   "url": "https://github.com/ktauchathuranga/achroma",
-  "uuid": "achroma@ktauchathuranga.github.io",
-  "version": 4
+  "uuid": "achroma-dev@ktauchathuranga.github.io",
+  "version": 5
 }

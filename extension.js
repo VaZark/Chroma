@@ -2,8 +2,7 @@
 
 import Clutter from 'gi://Clutter';
 import GObject from 'gi://GObject';
-import GLib from 'gi://GLib';
-import Shell from 'gi://Shell';
+import Cogl from 'gi://Cogl';
 
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -12,44 +11,24 @@ import * as QuickSettings from 'resource:///org/gnome/shell/ui/quickSettings.js'
 
 import { DEFAULT_PROFILES } from './profiles.js';
 
-// Custom tint shader that properly blends with original colors
+// Custom tint shader that properly blends with original colors.
 const TintEffect = GObject.registerClass(
-    class TintEffect extends Shell.GLSLEffect {
+    class TintEffect extends Clutter.ShaderEffect {
         _init(params = {}) {
+            const tint = params.tint || { r: 255, g: 220, b: 180, a: 40 };
+            const f = v => (v / 255.0).toFixed(6);
+            const snippet = Cogl.Snippet.new(
+                Cogl.SnippetHook.FRAGMENT,
+                '',
+                `cogl_color_out.rgb = mix(cogl_color_out.rgb, vec3(${f(tint.r)}, ${f(tint.g)}, ${f(tint.b)}) * cogl_color_out.a, ${f(tint.a)});`
+            );
             super._init();
-            this._tintColor = params.tint || { r: 255, g: 220, b: 180, a: 40 };
-            this._updateUniforms();
+            this._snippet = snippet;
+            this._tintColor = tint;
         }
 
-        vfunc_build_pipeline() {
-            const fragmentShader = `
-            uniform sampler2D tex;
-            uniform vec4 tint_color;
-            uniform float intensity;
-
-            void main() {
-                vec4 color = texture2D(tex, cogl_tex_coord_in[0].st);
-                vec3 tinted = mix(color.rgb, tint_color.rgb, intensity);
-                cogl_color_out = vec4(tinted, color.a);
-            }
-        `;
-            this.add_glsl_snippet(Shell.SnippetHook.FRAGMENT, '', fragmentShader, false);
-        }
-
-        _updateUniforms() {
-            const r = this._tintColor.r / 255.0;
-            const g = this._tintColor.g / 255.0;
-            const b = this._tintColor.b / 255.0;
-            const intensity = this._tintColor.a / 255.0;
-
-            this.set_uniform_float(this.get_uniform_location('tint_color'), 4, [r, g, b, 1.0]);
-            this.set_uniform_float(this.get_uniform_location('intensity'), 1, [intensity]);
-        }
-
-        set tint(value) {
-            this._tintColor = value;
-            this._updateUniforms();
-            this.queue_repaint();
+        vfunc_get_static_snippet() {
+            return this._snippet;
         }
 
         get tint() {
