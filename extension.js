@@ -13,274 +13,316 @@ import * as QuickSettings from 'resource:///org/gnome/shell/ui/quickSettings.js'
 
 import { DEFAULT_PROFILES } from './profiles.js';
 
-// Custom tint shader that properly blends with original colors.
+const ICON_NAME = 'applications-graphics-symbolic';
+const FALLBACK_PROFILE_ID = 'grayscale';
+
+// Effects are registered by name so each one can be removed without
+// disturbing effects that belong to other extensions on the same actor.
+const EFFECT_DESATURATE = 'achroma-effect-desat';
+const EFFECT_BRIGHTNESS_CONTRAST = 'achroma-effect-bc';
+const EFFECT_TINT = 'achroma-effect-tint';
+
+// Below this a brightness/contrast change is invisible, so the effect is skipped.
+const BRIGHTNESS_CONTRAST_EPSILON = 0.001;
+
+/**
+ * Blends a colour into the screen instead of overlaying it.
+ *
+ * Clutter has no built-in tint effect, and a plain overlay would wash out
+ * blacks. Mixing in the shader keeps the original luminance. The tint is
+ * premultiplied by the pixel's alpha so transparent pixels stay transparent.
+ */
 const TintEffect = GObject.registerClass(
     class TintEffect extends Clutter.ShaderEffect {
-        _init(params = {}) {
-            const tint = params.tint || { r: 255, g: 220, b: 180, a: 40 };
-            const f = v => (v / 255.0).toFixed(6);
+        _init({ tint }) {
+            const channel = value => (value / 255.0).toFixed(6);
             const snippet = Cogl.Snippet.new(
                 Cogl.SnippetHook.FRAGMENT,
                 '',
-                `cogl_color_out.rgb = mix(cogl_color_out.rgb, vec3(${f(tint.r)}, ${f(tint.g)}, ${f(tint.b)}) * cogl_color_out.a, ${f(tint.a)});`
+                `cogl_color_out.rgb = mix(
+                    cogl_color_out.rgb,
+                    vec3(${channel(tint.r)}, ${channel(tint.g)}, ${channel(tint.b)}) * cogl_color_out.a,
+                    ${channel(tint.a)});`
             );
             super._init();
             this._snippet = snippet;
-            this._tintColor = tint;
         }
 
         vfunc_get_static_snippet() {
             return this._snippet;
         }
-
-        get tint() {
-            return this._tintColor;
-        }
     });
 
-const EFFECT_DESAT = 'achroma-effect-desat';
-const EFFECT_BC = 'achroma-effect-bc';
-const EFFECT_TINT = 'achroma-effect-tint';
-
-const AchromaIndicator = GObject.registerClass(
-    class AchromaIndicator extends QuickSettings.QuickMenuToggle {
+const AchromaToggle = GObject.registerClass(
+    class AchromaToggle extends QuickSettings.QuickMenuToggle {
         _init(extensionObject) {
-          super._init({
-                 title: 'Achroma',
-                 iconName: 'applications-graphics-symbolic',
-                 toggleMode: true,
-             });
+            super._init({
+                title: 'Achroma',
+                iconName: ICON_NAME,
+                toggleMode: true,
+            });
 
             this._extensionObject = extensionObject;
             this._settings = extensionObject.getSettings();
-            this.checked = false; // Start safe
+            this._profileItems = {};
 
-             this.menu.setHeader(
-                 'applications-graphics-symbolic',
-                 'Achroma',
-                 null
-             );
+            // Always start off: a leftover effect from a previous session
+            // could otherwise leave the screen altered with the toggle out of sync.
+            this.checked = false;
 
-             this.connect('clicked', () => {
-                 if (this.checked)
-                     this._refreshEffect();
-                 else
-                     this._disableEffect();
-             });
+            this.menu.setHeader(ICON_NAME, 'Achroma', null);
+
+            this.connect('clicked', () => {
+                if (this.checked)
+                    this._applyCurrentProfile();
+                else
+                    this._clearEffects();
+            });
+            this.connect('notify::checked', () => this._syncMenuState());
+
             this._buildMenu();
-            this.connect('notify::checked', () => this._updateMenuState());
-
-            // 1. Standard Profile Change
-            this._settingsChangedId = this._settings.connect('changed::current-profile', () => {
-                this._updateMenuState();
-                // Only update if we are NOT previewing.
-                // If we are previewing, the preview logic handles the display.
-                if (this.checked && !this._settings.get_boolean('is-previewing')) {
-                    this._refreshEffect();
-                }
-            });
-
-            // 2. Custom Profile List Change
-            this._customProfilesId = this._settings.connect('changed::custom-profiles', () => {
-                this._buildMenu();
-            });
-
-            // 3. Live Preview Logic
-            this._previewModeId = this._settings.connect('changed::is-previewing', () => {
-                const isPreviewing = this._settings.get_boolean('is-previewing');
-                if (isPreviewing) {
-                    // Enter Preview Mode
-                    this._applyPreview();
-                } else {
-                    // Exit Preview Mode -> Revert to state
-                    this._disableEffect(); // Clear preview
-                    if (this.checked) {
-                        this._refreshEffect(); // Restore active profile if it was on
-                    }
-                }
-            });
-
-            this._previewDataId = this._settings.connect('changed::preview-profile', () => {
-                if (this._settings.get_boolean('is-previewing')) {
-                    this._applyPreview();
-                }
-            });
+            this._connectSettings();
         }
+
+        _connectSettings() {
+            this._settingsHandlerIds = [
+                this._settings.connect('changed::current-profile', () => {
+                    this._syncMenuState();
+                    // While previewing, the preview owns the screen; applying
+                    // the saved profile would flicker over it.
+                    if (this.checked && !this._isPreviewing())
+                        this._applyCurrentProfile();
+                }),
+
+                this._settings.connect('changed::custom-profiles', () => this._buildMenu()),
+
+                // Preferences run in a separate process from the shell, so
+                // settings are the only channel for live preview.
+                this._settings.connect('changed::is-previewing', () => {
+                    if (this._isPreviewing()) {
+                        this._applyPreviewProfile();
+                        return;
+                    }
+                    // Preview ended: drop it and restore whatever was active before.
+                    this._clearEffects();
+                    if (this.checked)
+                        this._applyCurrentProfile();
+                }),
+
+                this._settings.connect('changed::preview-profile', () => {
+                    if (this._isPreviewing())
+                        this._applyPreviewProfile();
+                }),
+            ];
+        }
+
+        _isPreviewing() {
+            return this._settings.get_boolean('is-previewing');
+        }
+
+        // --- Profiles ---
 
         _getAllProfiles() {
             const profiles = { ...DEFAULT_PROFILES };
             try {
-                const customJson = this._settings.get_string('custom-profiles');
-                const customList = JSON.parse(customJson);
-                customList.forEach(p => {
-                    if (p.id && p.name) profiles[p.id] = p;
-                });
-            } catch (e) { console.error(e); }
+                const customProfiles = JSON.parse(this._settings.get_string('custom-profiles'));
+                for (const profile of customProfiles) {
+                    if (profile.id && profile.name)
+                        profiles[profile.id] = profile;
+                }
+            } catch (e) {
+                console.error('Achroma: Bad custom profile data', e);
+            }
             return profiles;
         }
 
+        /**
+         * Falls back to grayscale because the selected profile can disappear
+         * (deleted in preferences) while it is still stored as current.
+         */
+        _getCurrentProfile() {
+            const profiles = this._getAllProfiles();
+            const currentId = this._settings.get_string('current-profile');
+            return profiles[currentId] || profiles[FALLBACK_PROFILE_ID];
+        }
+
+        // --- Menu ---
+
         _buildMenu() {
             this.menu.removeAll();
-
-          // Profiles
-            const profiles = this._getAllProfiles();
-            const currentProfileKey = this._settings.get_string('current-profile');
             this._profileItems = {};
 
-            for (const [key, profile] of Object.entries(profiles)) {
-                const item = new PopupMenu.PopupMenuItem(profile.name);
-                item._selectedIcon = new St.Icon({
-                    style_class: 'popup-menu-icon',
-                    icon_name: 'object-select-symbolic',
-                    x_align: Clutter.ActorAlign.START,
-                    x_expand: false,
-                    y_align: Clutter.ActorAlign.CENTER,
-                    visible: key === currentProfileKey,
-                });
-                // PopupMenuItem's label expands to fill the row; stop that so the check sits right after the text
-                item.label.x_expand = false;
-                // Let the label shrink and ellipsize on overflow; the icon keeps its natural width
-                item.label.clutter_text.ellipsize = Pango.EllipsizeMode.END;
-                item.add_child(item._selectedIcon);
-                item._selectedIcon.visible = this.checked && key === currentProfileKey;
-
-                item.connect('activate', () => {
-                    this._settings.set_string('current-profile', key);
-                    if (!this.checked) {
-                        this.checked = true;
-                        this._refreshEffect();
-                    }
-                });
-
-                this._profileItems[key] = item;
+            for (const [id, profile] of Object.entries(this._getAllProfiles())) {
+                const item = this._createProfileItem(id, profile);
+                this._profileItems[id] = item;
                 this.menu.addMenuItem(item);
             }
-            this._updateMenuState();
+
             this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-            const settingsItem = this.menu.addAction(
+            this._addPreferencesItem();
+            this._syncMenuState();
+        }
+
+        _createProfileItem(id, profile) {
+            const item = new PopupMenu.PopupMenuItem(profile.name);
+
+            // The label expands by default, which would push the check to the
+            // far edge. Letting it shrink and ellipsize keeps the check
+            // directly after the text and always visible, even for long names.
+            item.label.x_expand = false;
+            item.label.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+
+            item._selectedIcon = new St.Icon({
+                style_class: 'popup-menu-icon',
+                icon_name: 'object-select-symbolic',
+                x_align: Clutter.ActorAlign.START,
+                x_expand: false,
+                y_align: Clutter.ActorAlign.CENTER,
+                visible: false,
+            });
+            item.add_child(item._selectedIcon);
+
+            item.connect('activate', () => {
+                this._settings.set_string('current-profile', id);
+                // Picking a profile while off turns the effect on, so the
+                // choice is never silently ignored.
+                if (!this.checked) {
+                    this.checked = true;
+                    this._applyCurrentProfile();
+                }
+            });
+
+            return item;
+        }
+
+        _addPreferencesItem() {
+            const item = this.menu.addAction(
                 'Preferences',
                 () => this._extensionObject.openPreferences()
             );
-            settingsItem.visible = Main.sessionMode.allowSettings;
-            this.menu._settingsActions[this._extensionObject.uuid] = settingsItem;
+            item.visible = Main.sessionMode.allowSettings;
+
+            // Registering with the menu lets GNOME Shell hide the item on the
+            // lock screen, where settings must not be reachable.
+            this.menu._settingsActions[this._extensionObject.uuid] = item;
         }
 
-        _updateMenuState() {
-            const currentProfileKey = this._settings.get_string('current-profile');
-            for (const [key, item] of Object.entries(this._profileItems || {})) {
-                item._selectedIcon.visible = this.checked && key === currentProfileKey;
-            }
-            const current = this._getCurrentProfile();
-            this.subtitle = current ? current.name : null;
+        /**
+         * The check mark shows only while the effect is on, so it reflects
+         * what is on screen rather than just what is selected. The subtitle
+         * shows the selection either way, like the Wi-Fi tile does.
+         */
+        _syncMenuState() {
+            const currentId = this._settings.get_string('current-profile');
+            for (const [id, item] of Object.entries(this._profileItems))
+                item._selectedIcon.visible = this.checked && id === currentId;
+
+            this.subtitle = this._getCurrentProfile()?.name ?? null;
         }
 
-        // --- Effect Application Logic ---
+        // --- Effects ---
 
-        _refreshEffect() {
-            const profile = this._getCurrentProfile();
-            this._applyEffectData(profile);
+        _applyCurrentProfile() {
+            this._applyProfile(this._getCurrentProfile());
         }
 
-        _applyPreview() {
+        _applyPreviewProfile() {
             try {
-                const raw = this._settings.get_string('preview-profile');
-                const profile = JSON.parse(raw);
-                this._applyEffectData(profile);
+                const profile = JSON.parse(this._settings.get_string('preview-profile'));
+                this._applyProfile(profile);
             } catch (e) {
                 console.error('Achroma: Bad preview data', e);
             }
         }
 
-        _getCurrentProfile() {
-            const profileKey = this._settings.get_string('current-profile');
-            const profiles = this._getAllProfiles();
-            return profiles[profileKey] || profiles['grayscale'];
-        }
-
-        _applyEffectData(profile) {
-            // Always clean first to ensure clean state
-            this._disableEffect();
+        /**
+         * Rebuilds the whole effect chain on every call. Effects stay attached
+         * to the actor until removed, so applying only the changed ones would
+         * leave stale effects behind when a profile drops a property.
+         */
+        _applyProfile(profile) {
+            this._clearEffects();
 
             const uiGroup = Main.uiGroup;
 
-            // 1. Desaturation
-            if (profile.factor !== undefined) {
-                // Even if factor is 0, if the user requested it in preview, we apply it.
-                // But optimization: factor 0 desaturate is essentially no-op,
-                // unless we want to ensure chain consistency.
-                if (profile.factor > 0) {
-                    const effect = new Clutter.DesaturateEffect({ factor: profile.factor });
-                    uiGroup.add_effect_with_name(EFFECT_DESAT, effect);
-                }
+            // A factor of 0 is a no-op, so skip the effect entirely.
+            if (profile.factor > 0) {
+                uiGroup.add_effect_with_name(
+                    EFFECT_DESATURATE,
+                    new Clutter.DesaturateEffect({ factor: profile.factor })
+                );
             }
 
-            // 2. Brightness / Contrast
-            const b = profile.brightness || 0;
-            const c = profile.contrast || 0;
-            if (Math.abs(b) > 0.001 || Math.abs(c) > 0.001) {
-                const bcEffect = new Clutter.BrightnessContrastEffect();
-                bcEffect.set_brightness(b);
-                bcEffect.set_contrast(c);
-                uiGroup.add_effect_with_name(EFFECT_BC, bcEffect);
+            const brightness = profile.brightness || 0;
+            const contrast = profile.contrast || 0;
+            if (Math.abs(brightness) > BRIGHTNESS_CONTRAST_EPSILON ||
+                Math.abs(contrast) > BRIGHTNESS_CONTRAST_EPSILON) {
+                const effect = new Clutter.BrightnessContrastEffect();
+                effect.set_brightness(brightness);
+                effect.set_contrast(contrast);
+                uiGroup.add_effect_with_name(EFFECT_BRIGHTNESS_CONTRAST, effect);
             }
 
-            // 3. Tint - Use custom shader for proper blending
             if (profile.tint && profile.tint.a > 0) {
-                const tintEffect = new TintEffect({ tint: profile.tint });
-                uiGroup.add_effect_with_name(EFFECT_TINT, tintEffect);
+                uiGroup.add_effect_with_name(
+                    EFFECT_TINT,
+                    new TintEffect({ tint: profile.tint })
+                );
             }
         }
 
-        _disableEffect() {
+        _clearEffects() {
             const uiGroup = Main.uiGroup;
-            uiGroup.remove_effect_by_name(EFFECT_DESAT);
-            uiGroup.remove_effect_by_name(EFFECT_BC);
+            uiGroup.remove_effect_by_name(EFFECT_DESATURATE);
+            uiGroup.remove_effect_by_name(EFFECT_BRIGHTNESS_CONTRAST);
             uiGroup.remove_effect_by_name(EFFECT_TINT);
         }
 
         destroy() {
-            if (this._settingsChangedId) this._settings.disconnect(this._settingsChangedId);
-            if (this._customProfilesId) this._settings.disconnect(this._customProfilesId);
-            if (this._previewModeId) this._settings.disconnect(this._previewModeId);
-            if (this._previewDataId) this._settings.disconnect(this._previewDataId);
+            this._settingsHandlerIds.forEach(id => this._settings.disconnect(id));
 
-            // Ensure we leave in a clean state
-            this._disableEffect();
-            // Reset preview flag just in case
+            // Never leave the screen altered after the extension is gone.
+            this._clearEffects();
+
+            // The flag lives in shared settings, so a preferences window that
+            // died mid-preview would otherwise leave it set for the next session.
             this._settings.set_boolean('is-previewing', false);
 
             super.destroy();
         }
     });
 
+/**
+ * Wraps the toggle so the panel shows an icon whenever the effect is on.
+ */
 const AchromaSystemIndicator = GObject.registerClass(
     class AchromaSystemIndicator extends QuickSettings.SystemIndicator {
+        constructor(extensionObject) {
+            super();
 
-      constructor(extensionObject) {
-          super();
-          this._indicator = this._addIndicator();
-          this._indicator.iconName = 'applications-graphics-symbolic';
-          const toggle = new AchromaIndicator(extensionObject);
-          toggle.bind_property(
-              'checked',
-              this._indicator,
-              'visible',
-              GObject.BindingFlags.SYNC_CREATE
-          );
-          this.quickSettingsItems.push(toggle);
-      }
+            this._indicator = this._addIndicator();
+            this._indicator.iconName = ICON_NAME;
+
+            const toggle = new AchromaToggle(extensionObject);
+            toggle.bind_property(
+                'checked',
+                this._indicator,
+                'visible',
+                GObject.BindingFlags.SYNC_CREATE
+            );
+            this.quickSettingsItems.push(toggle);
+        }
     });
 
 export default class AchromaExtension extends Extension {
-  enable() {
-      this._indicator = new AchromaSystemIndicator(this);
-      Main.panel.statusArea.quickSettings.addExternalIndicator(
-          this._indicator
-      );
-  }
+    enable() {
+        this._indicator = new AchromaSystemIndicator(this);
+        Main.panel.statusArea.quickSettings.addExternalIndicator(this._indicator);
+    }
 
-  disable() {
-    this._indicator.quickSettingsItems.forEach(item => item.destroy());
-    this._indicator.destroy();
-  }
+    disable() {
+        this._indicator.quickSettingsItems.forEach(item => item.destroy());
+        this._indicator.destroy();
+        this._indicator = null;
+    }
 }

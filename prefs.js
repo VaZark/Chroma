@@ -7,131 +7,156 @@ import GLib from 'gi://GLib';
 
 import { ExtensionPreferences } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
-import { DEFAULT_PROFILE_NAMES } from './profiles.js';
+import { DEFAULT_PROFILES } from './profiles.js';
 
+// Slider drags fire many events per second and every preview update is a
+// settings write the shell must react to, so updates are batched.
+const PREVIEW_THROTTLE_MS = 30;
+
+const DEFAULT_TINT_COLOR = 'rgba(255, 220, 180, 1)';
+const DEFAULT_TINT_INTENSITY = 40;
 
 export default class AchromaPreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
         const settings = this.getSettings();
 
-        // Safety reset on load
+        // A preferences window that crashed mid-preview leaves the flag set,
+        // which would keep the shell showing a stale preview.
         settings.set_boolean('is-previewing', false);
 
-        // --- Page 1: General ---
         const page = new Adw.PreferencesPage({
             title: 'General',
             icon_name: 'preferences-system-symbolic',
         });
         window.add(page);
 
-        // Group 1: Custom Profiles
         const customGroup = new Adw.PreferencesGroup({
             title: 'Custom Profiles',
             description: 'Create your own display effects',
         });
         page.add(customGroup);
 
-        // Group 2: Selection
         const selectionGroup = new Adw.PreferencesGroup({
             title: 'Active Profile',
             description: 'Select the profile to apply',
         });
         page.add(selectionGroup);
+
         const comboRow = new Adw.ComboRow({ title: 'Current Profile' });
         selectionGroup.add(comboRow);
 
-        // Track rows for proper cleanup
-        let customRows = [];
-
-        // Helper to refresh list
-        const updateCustomList = () => {
-            // Remove previously added rows
-            customRows.forEach(row => {
-                customGroup.remove(row);
-            });
-            customRows = [];
-
-            const profiles = this._getCustomProfiles(settings);
-
-            // Existing Profiles
-            profiles.forEach((p, index) => {
-                const row = new Adw.ActionRow({ title: p.name });
-                const delBtn = new Gtk.Button({
-                    icon_name: 'user-trash-symbolic',
-                    valign: Gtk.Align.CENTER,
-                });
-                delBtn.add_css_class('destructive-action');
-                delBtn.connect('clicked', () => {
-                    const currentProfiles = this._getCustomProfiles(settings);
-                    currentProfiles.splice(index, 1);
-                    settings.set_string('custom-profiles', JSON.stringify(currentProfiles));
-                    updateCustomList();
-                    this._refreshCombo(settings, comboRow);
-                });
-                row.add_suffix(delBtn);
-                customGroup.add(row);
-                customRows.push(row);
-            });
-
-            // "New Profile" Button
-            const addRow = new Adw.ActionRow({
-                title: 'Create New Profile',
-                subtitle: 'Configure brightness, contrast, and color',
-                activatable: true
-            });
-            const addIcon = new Gtk.Image({ icon_name: 'list-add-symbolic' });
-            addRow.add_prefix(addIcon);
-            addRow.connect('activated', () => {
-                this._openProfileCreator(window, settings, () => {
-                    updateCustomList();
-                    this._refreshCombo(settings, comboRow);
-                });
-            });
-            customGroup.add(addRow);
-            customRows.push(addRow);
+        const refreshProfiles = () => {
+            this._populateCustomProfileRows(window, settings, customGroup, refreshProfiles);
+            this._populateProfileCombo(settings, comboRow);
         };
-
-        // Init
-        updateCustomList();
-        this._refreshCombo(settings, comboRow);
+        refreshProfiles();
 
         comboRow.connect('notify::selected', () => {
             const model = comboRow.get_model();
-            if (!model) return;
+            if (!model)
+                return;
             const item = model.get_item(comboRow.get_selected());
-            if (item) settings.set_string('current-profile', item.get_string());
+            if (item)
+                settings.set_string('current-profile', item.get_string());
         });
     }
+
+    // --- Profile storage ---
 
     _getCustomProfiles(settings) {
         try {
             return JSON.parse(settings.get_string('custom-profiles'));
-        } catch (e) { return []; }
+        } catch (e) {
+            return [];
+        }
     }
 
-    _refreshCombo(settings, comboRow) {
+    _saveCustomProfiles(settings, profiles) {
+        settings.set_string('custom-profiles', JSON.stringify(profiles));
+    }
+
+    // --- Profile list ---
+
+    /**
+     * Rows are tracked on the group because Adw.PreferencesGroup offers no
+     * way to clear its children, so stale rows must be removed individually
+     * before the list is rebuilt.
+     */
+    _populateCustomProfileRows(window, settings, group, onChange) {
+        (group._achromaRows ?? []).forEach(row => group.remove(row));
+        group._achromaRows = [];
+
+        const addRow = row => {
+            group.add(row);
+            group._achromaRows.push(row);
+        };
+
+        this._getCustomProfiles(settings).forEach((profile, index) => {
+            addRow(this._createProfileRow(settings, profile, index, onChange));
+        });
+        addRow(this._createNewProfileRow(window, settings, onChange));
+    }
+
+    _createProfileRow(settings, profile, index, onChange) {
+        const row = new Adw.ActionRow({ title: profile.name });
+
+        const deleteButton = new Gtk.Button({
+            icon_name: 'user-trash-symbolic',
+            valign: Gtk.Align.CENTER,
+        });
+        deleteButton.add_css_class('destructive-action');
+        deleteButton.connect('clicked', () => {
+            // Re-read instead of reusing the list captured at build time, which
+            // may be stale if another change happened since the rows were drawn.
+            const profiles = this._getCustomProfiles(settings);
+            profiles.splice(index, 1);
+            this._saveCustomProfiles(settings, profiles);
+            onChange();
+        });
+        row.add_suffix(deleteButton);
+
+        return row;
+    }
+
+    _createNewProfileRow(window, settings, onChange) {
+        const row = new Adw.ActionRow({
+            title: 'Create New Profile',
+            subtitle: 'Configure brightness, contrast, and color',
+            activatable: true,
+        });
+        row.add_prefix(new Gtk.Image({ icon_name: 'list-add-symbolic' }));
+        row.connect('activated', () => this._openProfileCreator(window, settings, onChange));
+        return row;
+    }
+
+    _populateProfileCombo(settings, comboRow) {
         const model = new Gtk.StringList();
-        const custom = this._getCustomProfiles(settings);
-
-        for (const key of Object.keys(DEFAULT_PROFILE_NAMES)) model.append(key);
-        for (const p of custom) model.append(p.id);
-
+        Object.keys(DEFAULT_PROFILES).forEach(id => model.append(id));
+        this._getCustomProfiles(settings).forEach(profile => model.append(profile.id));
         comboRow.set_model(model);
 
-        const current = settings.get_string('current-profile');
-        let found = false;
+        // Fall back to the first entry when the stored profile no longer
+        // exists, so the combo never shows an empty selection.
+        const currentId = settings.get_string('current-profile');
+        let selectedIndex = 0;
         for (let i = 0; i < model.get_n_items(); i++) {
-            if (model.get_string(i) === current) {
-                comboRow.set_selected(i);
-                found = true;
+            if (model.get_string(i) === currentId) {
+                selectedIndex = i;
                 break;
             }
         }
-        if (!found) comboRow.set_selected(0);
+        comboRow.set_selected(selectedIndex);
     }
 
-    _openProfileCreator(parentWindow, settings, callback) {
-        // --- 1. ENTER PREVIEW MODE ---
+    // --- Profile creator dialog ---
+
+    /**
+     * Live preview works by flipping `is-previewing` and streaming the draft
+     * profile through settings, which the shell extension watches. The flag
+     * must be cleared on every exit path, otherwise the shell keeps showing
+     * the draft instead of the saved profile.
+     */
+    _openProfileCreator(parentWindow, settings, onSaved) {
         settings.set_boolean('is-previewing', true);
 
         try {
@@ -141,196 +166,221 @@ export default class AchromaPreferences extends ExtensionPreferences {
                 title: 'Create Custom Profile',
                 default_width: 450,
                 default_height: 600,
-                resizable: false
+                resizable: false,
             });
-
-            // Handle Close Request (Ensure we exit preview mode)
             dialog.connect('close-request', () => {
                 settings.set_boolean('is-previewing', false);
-                return false; // Propagate close
+                return false;
             });
 
-            const box = new Gtk.Box({ orientation: Gtk.Orientation.VERTICAL });
-            const scrolled = new Gtk.ScrolledWindow({ hscrollbar_policy: Gtk.PolicyType.NEVER, vexpand: true });
-            const content = new Gtk.Box({
-                orientation: Gtk.Orientation.VERTICAL,
-                spacing: 12,
-                margin_top: 24, margin_bottom: 24, margin_start: 24, margin_end: 24
-            });
+            const controls = this._buildProfileControls();
+            const pushPreview = this._createThrottledPreview(settings, controls);
 
-            scrolled.set_child(content);
-            box.append(scrolled);
-            dialog.set_child(box);
+            this._connectPreviewListeners(controls, pushPreview);
 
-            // --- Controls ---
+            const actionBar = this._buildActionBar(dialog, settings, controls, onSaved);
+            const root = new Gtk.Box({ orientation: Gtk.Orientation.VERTICAL });
+            root.append(this._wrapInScroller(controls.container));
+            root.append(actionBar);
+            dialog.set_child(root);
 
-            // Name
-            const nameGroup = new Adw.PreferencesGroup();
-            content.append(nameGroup);
-            const nameEntry = new Adw.EntryRow({ title: 'Profile Name' });
-            nameGroup.add(nameEntry);
-
-            // Saturation
-            const grayGroup = new Adw.PreferencesGroup({ title: 'Saturation' });
-            content.append(grayGroup);
-            const grayScale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0.0, 1.0, 0.05);
-            grayScale.set_value(1.0);
-            grayScale.set_hexpand(true);
-            const grayRow = new Adw.ActionRow({ title: 'Desaturation Level' });
-            grayRow.add_suffix(grayScale);
-            grayGroup.add(grayRow);
-
-            // Exposure
-            const bcGroup = new Adw.PreferencesGroup({ title: 'Exposure' });
-            content.append(bcGroup);
-
-            const brightScale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, -1.0, 1.0, 0.05);
-            brightScale.set_value(0.0);
-            brightScale.set_hexpand(true);
-            const brightRow = new Adw.ActionRow({ title: 'Brightness' });
-            brightRow.add_suffix(brightScale);
-            bcGroup.add(brightRow);
-
-            const contrastScale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, -1.0, 1.0, 0.05);
-            contrastScale.set_value(0.0);
-            contrastScale.set_hexpand(true);
-            const contrastRow = new Adw.ActionRow({ title: 'Contrast' });
-            contrastRow.add_suffix(contrastScale);
-            bcGroup.add(contrastRow);
-
-            // Tint
-            const tintGroup = new Adw.PreferencesGroup({ title: 'Color Tint' });
-            content.append(tintGroup);
-            const tintSwitchRow = new Adw.SwitchRow({ title: 'Enable Color Tint' });
-            tintGroup.add(tintSwitchRow);
-
-            const defRgba = new Gdk.RGBA();
-            defRgba.parse('rgba(255, 220, 180, 1)');
-            const colorDialog = new Gtk.ColorDialog({ with_alpha: true });
-            const colorBtn = new Gtk.ColorDialogButton({
-                dialog: colorDialog,
-                rgba: defRgba,
-            });
-            colorBtn.set_valign(Gtk.Align.CENTER);
-
-            const colorRow = new Adw.ActionRow({ title: 'Tint Color' });
-            colorRow.add_suffix(colorBtn);
-            tintGroup.add(colorRow);
-            // ---------------------------------------------
-
-            const alphaScale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 255, 5);
-            alphaScale.set_value(40);
-            alphaScale.set_hexpand(true);
-            const alphaRow = new Adw.ActionRow({ title: 'Tint Intensity' });
-            alphaRow.add_suffix(alphaScale);
-            tintGroup.add(alphaRow);
-
-            // --- Action Bar ---
-            const actionBar = new Gtk.ActionBar();
-            box.append(actionBar);
-
-            const cancelBtn = new Gtk.Button({ label: 'Cancel' });
-            cancelBtn.connect('clicked', () => {
-                dialog.close();
-            });
-            actionBar.pack_start(cancelBtn);
-
-            const saveBtn = new Gtk.Button({ label: 'Save Profile' });
-            saveBtn.add_css_class('suggested-action');
-            saveBtn.set_sensitive(false);
-
-            nameEntry.connect('notify::text', () => {
-                saveBtn.set_sensitive(nameEntry.get_text().length > 0);
-            });
-
-            // --- Live Preview Logic ---
-
-            const gatherData = () => {
-                const tintEnabled = tintSwitchRow.get_active();
-                let tintObj = null;
-                if (tintEnabled) {
-                    const c = colorBtn.get_rgba();
-                    tintObj = {
-                        r: Math.round(c.red * 255),
-                        g: Math.round(c.green * 255),
-                        b: Math.round(c.blue * 255),
-                        a: alphaScale.get_value()
-                    };
-                }
-                return {
-                    factor: grayScale.get_value(),
-                    brightness: brightScale.get_value(),
-                    contrast: contrastScale.get_value(),
-                    tint: tintObj
-                };
-            };
-
-            // Throttled update function
-            let updateSourceId = 0;
-            const updatePreview = () => {
-                if (updateSourceId > 0) return;
-
-                updateSourceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 30, () => {
-                    const data = gatherData();
-                    settings.set_string('preview-profile', JSON.stringify(data));
-                    updateSourceId = 0;
-                    return GLib.SOURCE_REMOVE;
-                });
-            };
-
-            const updateTintVis = () => {
-                const active = tintSwitchRow.get_active();
-                colorRow.set_sensitive(active);
-                alphaRow.set_sensitive(active);
-                updatePreview();
-            };
-            tintSwitchRow.connect('notify::active', updateTintVis);
-            updateTintVis();
-
-            // Connect Listeners
-            grayScale.connect('value-changed', updatePreview);
-            brightScale.connect('value-changed', updatePreview);
-            contrastScale.connect('value-changed', updatePreview);
-            alphaScale.connect('value-changed', updatePreview);
-            colorBtn.connect('notify::rgba', updatePreview);
-
-            saveBtn.connect('clicked', () => {
-                const name = nameEntry.get_text();
-                if (!name) return;
-
-                const id = 'custom-' + Math.random().toString(36).substr(2, 9);
-                const data = gatherData();
-
-                const newProfile = {
-                    id: id,
-                    name: name,
-                    type: 'custom',
-                    factor: data.factor,
-                    brightness: data.brightness,
-                    contrast: data.contrast,
-                    tint: data.tint
-                };
-
-                const custom = this._getCustomProfiles(settings);
-                custom.push(newProfile);
-                settings.set_string('custom-profiles', JSON.stringify(custom));
-
-                settings.set_boolean('is-previewing', false);
-
-                callback();
-                dialog.destroy();
-            });
-            actionBar.pack_end(saveBtn);
-
-            // Initial preview push
-            updatePreview();
-
+            pushPreview();
             dialog.present();
-
         } catch (e) {
-            // Safety catch: if UI build fails, log error and Reset State so user isn't stuck
+            // If building the UI fails the dialog (and its close handler)
+            // never exists, so reset here or the preview would be stuck on.
             console.error('Achroma Preferences Error:', e);
             settings.set_boolean('is-previewing', false);
         }
+    }
+
+    _wrapInScroller(child) {
+        const scrolled = new Gtk.ScrolledWindow({
+            hscrollbar_policy: Gtk.PolicyType.NEVER,
+            vexpand: true,
+        });
+        scrolled.set_child(child);
+        return scrolled;
+    }
+
+    _createSliderRow(title, { min, max, step, value }) {
+        const scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, min, max, step);
+        scale.set_value(value);
+        scale.set_hexpand(true);
+
+        const row = new Adw.ActionRow({ title });
+        row.add_suffix(scale);
+        return { row, scale };
+    }
+
+    _buildProfileControls() {
+        const container = new Gtk.Box({
+            orientation: Gtk.Orientation.VERTICAL,
+            spacing: 12,
+            margin_top: 24,
+            margin_bottom: 24,
+            margin_start: 24,
+            margin_end: 24,
+        });
+
+        const nameGroup = new Adw.PreferencesGroup();
+        const nameEntry = new Adw.EntryRow({ title: 'Profile Name' });
+        nameGroup.add(nameEntry);
+        container.append(nameGroup);
+
+        const saturationGroup = new Adw.PreferencesGroup({ title: 'Saturation' });
+        const saturation = this._createSliderRow('Desaturation Level', { min: 0, max: 1, step: 0.05, value: 1 });
+        saturationGroup.add(saturation.row);
+        container.append(saturationGroup);
+
+        const exposureGroup = new Adw.PreferencesGroup({ title: 'Exposure' });
+        const brightness = this._createSliderRow('Brightness', { min: -1, max: 1, step: 0.05, value: 0 });
+        const contrast = this._createSliderRow('Contrast', { min: -1, max: 1, step: 0.05, value: 0 });
+        exposureGroup.add(brightness.row);
+        exposureGroup.add(contrast.row);
+        container.append(exposureGroup);
+
+        const tintGroup = new Adw.PreferencesGroup({ title: 'Color Tint' });
+        const tintSwitch = new Adw.SwitchRow({ title: 'Enable Color Tint' });
+        const tintColor = this._createTintColorRow();
+        const tintIntensity = this._createSliderRow('Tint Intensity', {
+            min: 0, max: 255, step: 5, value: DEFAULT_TINT_INTENSITY,
+        });
+        tintGroup.add(tintSwitch);
+        tintGroup.add(tintColor.row);
+        tintGroup.add(tintIntensity.row);
+        container.append(tintGroup);
+
+        // The tint options mean nothing while the tint is off, so they are
+        // disabled rather than hidden to keep the layout stable.
+        const syncTintSensitivity = () => {
+            const enabled = tintSwitch.get_active();
+            tintColor.row.set_sensitive(enabled);
+            tintIntensity.row.set_sensitive(enabled);
+        };
+        tintSwitch.connect('notify::active', syncTintSensitivity);
+        syncTintSensitivity();
+
+        return {
+            container,
+            nameEntry,
+            saturationScale: saturation.scale,
+            brightnessScale: brightness.scale,
+            contrastScale: contrast.scale,
+            tintSwitch,
+            tintButton: tintColor.button,
+            tintIntensityScale: tintIntensity.scale,
+        };
+    }
+
+    _createTintColorRow() {
+        const rgba = new Gdk.RGBA();
+        rgba.parse(DEFAULT_TINT_COLOR);
+
+        const button = new Gtk.ColorDialogButton({
+            dialog: new Gtk.ColorDialog({ with_alpha: true }),
+            rgba,
+        });
+        button.set_valign(Gtk.Align.CENTER);
+
+        const row = new Adw.ActionRow({ title: 'Tint Color' });
+        row.add_suffix(button);
+        return { row, button };
+    }
+
+    /**
+     * Reads the current control values in the same shape the extension
+     * expects, so one object serves both live preview and saving.
+     */
+    _readProfile(controls) {
+        let tint = null;
+        if (controls.tintSwitch.get_active()) {
+            const color = controls.tintButton.get_rgba();
+            tint = {
+                r: Math.round(color.red * 255),
+                g: Math.round(color.green * 255),
+                b: Math.round(color.blue * 255),
+                a: controls.tintIntensityScale.get_value(),
+            };
+        }
+        return {
+            factor: controls.saturationScale.get_value(),
+            brightness: controls.brightnessScale.get_value(),
+            contrast: controls.contrastScale.get_value(),
+            tint,
+        };
+    }
+
+    _createThrottledPreview(settings, controls) {
+        let pendingSourceId = 0;
+
+        return () => {
+            if (pendingSourceId > 0)
+                return;
+
+            pendingSourceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, PREVIEW_THROTTLE_MS, () => {
+                settings.set_string('preview-profile', JSON.stringify(this._readProfile(controls)));
+                pendingSourceId = 0;
+                return GLib.SOURCE_REMOVE;
+            });
+        };
+    }
+
+    _connectPreviewListeners(controls, pushPreview) {
+        controls.saturationScale.connect('value-changed', pushPreview);
+        controls.brightnessScale.connect('value-changed', pushPreview);
+        controls.contrastScale.connect('value-changed', pushPreview);
+        controls.tintIntensityScale.connect('value-changed', pushPreview);
+        controls.tintButton.connect('notify::rgba', pushPreview);
+        controls.tintSwitch.connect('notify::active', pushPreview);
+    }
+
+    _buildActionBar(dialog, settings, controls, onSaved) {
+        const actionBar = new Gtk.ActionBar();
+
+        const cancelButton = new Gtk.Button({ label: 'Cancel' });
+        cancelButton.connect('clicked', () => dialog.close());
+        actionBar.pack_start(cancelButton);
+
+        // An unnamed profile would be unselectable in the menu, so saving
+        // stays disabled until a name is entered.
+        const saveButton = new Gtk.Button({ label: 'Save Profile' });
+        saveButton.add_css_class('suggested-action');
+        saveButton.set_sensitive(false);
+        controls.nameEntry.connect('notify::text', () => {
+            saveButton.set_sensitive(controls.nameEntry.get_text().length > 0);
+        });
+
+        saveButton.connect('clicked', () => {
+            const name = controls.nameEntry.get_text();
+            if (!name)
+                return;
+
+            const profiles = this._getCustomProfiles(settings);
+            profiles.push({
+                id: this._generateProfileId(),
+                name,
+                type: 'custom',
+                ...this._readProfile(controls),
+            });
+            this._saveCustomProfiles(settings, profiles);
+
+            // destroy() bypasses the close-request handler that normally clears
+            // the flag, so it has to be cleared here.
+            settings.set_boolean('is-previewing', false);
+            onSaved();
+            dialog.destroy();
+        });
+        actionBar.pack_end(saveButton);
+
+        return actionBar;
+    }
+
+    /**
+     * Random rather than derived from the name so renaming or duplicate names
+     * can never make two profiles collide.
+     */
+    _generateProfileId() {
+        return `custom-${Math.random().toString(36).slice(2, 11)}`;
     }
 }

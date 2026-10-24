@@ -1,7 +1,10 @@
 'use strict';
 
 /**
- * Shared profile definitions for Achroma extension
+ * Built-in profiles, shared by the shell extension and the preferences window.
+ *
+ * `factor` is desaturation (0-1), `brightness` and `contrast` are -1 to 1,
+ * and `tint` is an RGB colour with `a` as intensity (0-255).
  */
 
 export const DEFAULT_PROFILES = {
@@ -10,12 +13,4 @@ export const DEFAULT_PROFILES = {
     'high-contrast': { name: 'High Contrast', factor: 1.0, brightness: 0.1, contrast: 0.2, type: 'preset' },
     'low-brightness': { name: 'Low Brightness', factor: 1.0, brightness: -0.2, type: 'preset' },
     'sepia': { name: 'Sepia', factor: 0.8, tint: { r: 255, g: 220, b: 180, a: 40 }, type: 'preset' }
-};
-
-export const DEFAULT_PROFILE_NAMES = {
-    'grayscale': 'Grayscale',
-    'soft': 'Soft',
-    'high-contrast': 'High Contrast',
-    'low-brightness': 'Low Brightness',
-    'sepia': 'Sepia'
 };
