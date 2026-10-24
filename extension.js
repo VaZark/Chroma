@@ -3,6 +3,7 @@
 import Clutter from 'gi://Clutter';
 import GObject from 'gi://GObject';
 import Cogl from 'gi://Cogl';
+import Pango from 'gi://Pango';
 import St from 'gi://St';
 
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
@@ -67,6 +68,7 @@ const AchromaIndicator = GObject.registerClass(
                      this._disableEffect();
              });
             this._buildMenu();
+            this.connect('notify::checked', () => this._updateMenuState());
 
             // 1. Standard Profile Change
             this._settingsChangedId = this._settings.connect('changed::current-profile', () => {
@@ -130,12 +132,17 @@ const AchromaIndicator = GObject.registerClass(
                 item._selectedIcon = new St.Icon({
                     style_class: 'popup-menu-icon',
                     icon_name: 'object-select-symbolic',
-                    x_align: Clutter.ActorAlign.END,
-                    x_expand: true,
+                    x_align: Clutter.ActorAlign.START,
+                    x_expand: false,
                     y_align: Clutter.ActorAlign.CENTER,
                     visible: key === currentProfileKey,
                 });
+                // PopupMenuItem's label expands to fill the row; stop that so the check sits right after the text
+                item.label.x_expand = false;
+                // Let the label shrink and ellipsize on overflow; the icon keeps its natural width
+                item.label.clutter_text.ellipsize = Pango.EllipsizeMode.END;
                 item.add_child(item._selectedIcon);
+                item._selectedIcon.visible = this.checked && key === currentProfileKey;
 
                 item.connect('activate', () => {
                     this._settings.set_string('current-profile', key);
@@ -148,6 +155,7 @@ const AchromaIndicator = GObject.registerClass(
                 this._profileItems[key] = item;
                 this.menu.addMenuItem(item);
             }
+            this._updateMenuState();
             this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
             const settingsItem = this.menu.addAction(
                 'Preferences',
@@ -160,8 +168,10 @@ const AchromaIndicator = GObject.registerClass(
         _updateMenuState() {
             const currentProfileKey = this._settings.get_string('current-profile');
             for (const [key, item] of Object.entries(this._profileItems || {})) {
-                item._selectedIcon.visible = key === currentProfileKey;
+                item._selectedIcon.visible = this.checked && key === currentProfileKey;
             }
+            const current = this._getCurrentProfile();
+            this.subtitle = current ? current.name : null;
         }
 
         // --- Effect Application Logic ---
