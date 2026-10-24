@@ -1,19 +1,13 @@
 'use strict';
 
 /**
- * Built-in profiles, shared by the shell extension and the preferences window.
+ * Profile definitions and storage, shared by the shell extension and the
+ * preferences window.
  *
- * `factor` is desaturation (0-1), `brightness` and `contrast` are -1 to 1,
- * and `tint` is an RGB colour with `a` as intensity (0-255).
+ * A profile is `{ id, name, factor, brightness, contrast, tint }`: `factor` is
+ * desaturation (0-1), `brightness` and `contrast` are signed, and `tint` is an
+ * RGB colour with `a` as intensity, or null.
  */
-
-export const DEFAULT_PROFILES = {
-    'grayscale': { name: 'Grayscale', factor: 1.0, type: 'preset' },
-    'soft': { name: 'Soft', factor: 0.7, type: 'preset' },
-    'high-contrast': { name: 'High Contrast', factor: 1.0, brightness: 0.1, contrast: 0.2, type: 'preset' },
-    'low-brightness': { name: 'Low Brightness', factor: 1.0, brightness: -0.2, type: 'preset' },
-    'sepia': { name: 'Sepia', factor: 0.8, tint: { r: 255, g: 220, b: 180, a: 40 }, type: 'preset' }
-};
 
 // Near the extremes brightness/contrast crush the screen to solid black or
 // white, leaving nothing visible to correct, so the user could not undo a
@@ -25,3 +19,39 @@ export const CONTRAST_LIMIT = 0.9;
 // Tint intensity is a blend factor out of 255. At the top it replaces the
 // screen with a flat colour, so it is capped well short of that.
 export const TINT_INTENSITY_LIMIT = 150;
+
+// Only a starting point: once saved, these are ordinary profiles that can be
+// edited or deleted like any other.
+export const DEFAULT_PROFILES = [
+    { id: 'grayscale', name: 'Grayscale', factor: 1.0 },
+    { id: 'soft', name: 'Soft', factor: 0.7 },
+];
+
+const cloneDefaultProfiles = () => DEFAULT_PROFILES.map(profile => ({ ...profile }));
+
+const parseProfiles = json => {
+    const parsed = JSON.parse(json);
+    return parsed.filter(profile => profile.id && profile.name);
+};
+
+/**
+ * An empty `profiles` key means the user has never saved, so the defaults are
+ * returned. That is deliberately different from an empty list ('[]'), which
+ * means the user deleted everything and must not get the defaults back.
+ */
+export function loadProfiles(settings) {
+    const stored = settings.get_string('profiles');
+    if (stored === '')
+        return cloneDefaultProfiles();
+
+    try {
+        return parseProfiles(stored);
+    } catch (e) {
+        console.error('Achroma: Bad profile data', e);
+        return cloneDefaultProfiles();
+    }
+}
+
+export function saveProfiles(settings, profiles) {
+    settings.set_string('profiles', JSON.stringify(profiles));
+}

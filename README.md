@@ -13,13 +13,14 @@ Useful for reducing eye strain, improving focus, or accessibility.
 
 ## Profiles
 
+Two profiles ship by default. They are ordinary profiles: edit or delete them in preferences like any you create.
+
 | Profile | Description |
 |---------|-------------|
 | Grayscale | Standard full desaturation |
 | Soft | Subtle 70% desaturation |
-| High Contrast | Grayscale with enhanced contrast |
-| Low Brightness | Darker grayscale for night use |
-| Sepia | Warm vintage tone |
+
+The quick settings menu has Desaturation, Brightness and Contrast sliders. Moving one adjusts the screen live as an unsaved "Custom" profile; picking a saved profile discards it.
 
 ## Installation
 
@@ -59,7 +60,8 @@ Useful for reducing eye strain, improving focus, or accessibility.
 | Action | Result |
 |--------|--------|
 | Left click on icon | Toggle effect on/off |
-| Extension Preferences | Select color profile |
+| Quick settings sliders | Adjust desaturation, brightness and contrast live |
+| Extension Preferences | Create, edit, delete and select profiles |
 
 ### Opening Preferences
 

@@ -10,11 +10,11 @@ import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import * as QuickSettings from 'resource:///org/gnome/shell/ui/quickSettings.js';
+import { Slider } from 'resource:///org/gnome/shell/ui/slider.js';
 
-import { DEFAULT_PROFILES, BRIGHTNESS_LIMIT, CONTRAST_LIMIT, TINT_INTENSITY_LIMIT } from './profiles.js';
+import { BRIGHTNESS_LIMIT, CONTRAST_LIMIT, TINT_INTENSITY_LIMIT, loadProfiles } from './profiles.js';
 
 const ICON_NAME = 'applications-graphics-symbolic';
-const FALLBACK_PROFILE_ID = 'grayscale';
 
 // Effects are registered by name so each one can be removed without
 // disturbing effects that belong to other extensions on the same actor.
@@ -72,6 +72,16 @@ const TintEffect = GObject.registerClass(
         }
     });
 
+// The properties a live slider can change. Tint is left out because a colour
+// does not fit a single slider; it is kept from whichever profile is active.
+const SLIDERS = [
+    { property: 'factor', title: 'Desaturation', min: 0, max: 1 },
+    { property: 'brightness', title: 'Brightness', min: -BRIGHTNESS_LIMIT, max: BRIGHTNESS_LIMIT },
+    { property: 'contrast', title: 'Contrast', min: -CONTRAST_LIMIT, max: CONTRAST_LIMIT },
+];
+
+const LIVE_PROFILE_NAME = 'Custom';
+
 const AchromaToggle = GObject.registerClass(
     class AchromaToggle extends QuickSettings.QuickMenuToggle {
         _init(extensionObject) {
@@ -84,6 +94,13 @@ const AchromaToggle = GObject.registerClass(
             this._extensionObject = extensionObject;
             this._settings = extensionObject.getSettings();
             this._profileItems = {};
+            this._sliders = {};
+            this._syncingSliders = false;
+
+            // Slider adjustments live here instead of in settings: they are
+            // a scratch profile that was never named or saved, so it should
+            // not outlive the session or appear in preferences.
+            this._liveProfile = null;
 
             // Always start off: a leftover effect from a previous session
             // could otherwise leave the screen altered with the toggle out of sync.
@@ -93,7 +110,7 @@ const AchromaToggle = GObject.registerClass(
 
             this.connect('clicked', () => {
                 if (this.checked)
-                    this._applyCurrentProfile();
+                    this._applyActiveProfile();
                 else
                     this._clearEffects();
             });
@@ -106,14 +123,16 @@ const AchromaToggle = GObject.registerClass(
         _connectSettings() {
             this._settingsHandlerIds = [
                 this._settings.connect('changed::current-profile', () => {
-                    this._syncMenuState();
-                    // While previewing, the preview owns the screen; applying
-                    // the saved profile would flicker over it.
-                    if (this.checked && !this._isPreviewing())
-                        this._applyCurrentProfile();
+                    // Choosing a saved profile discards any slider tweaks made
+                    // on top of the previous one.
+                    this._liveProfile = null;
+                    this._refresh();
                 }),
 
-                this._settings.connect('changed::custom-profiles', () => this._buildMenu()),
+                this._settings.connect('changed::profiles', () => {
+                    this._buildMenu();
+                    this._reapplyIfActive();
+                }),
 
                 // Preferences run in a separate process from the shell, so
                 // settings are the only channel for live preview.
@@ -124,8 +143,7 @@ const AchromaToggle = GObject.registerClass(
                     }
                     // Preview ended: drop it and restore whatever was active before.
                     this._clearEffects();
-                    if (this.checked)
-                        this._applyCurrentProfile();
+                    this._reapplyIfActive();
                 }),
 
                 this._settings.connect('changed::preview-profile', () => {
@@ -141,28 +159,23 @@ const AchromaToggle = GObject.registerClass(
 
         // --- Profiles ---
 
-        _getAllProfiles() {
-            const profiles = { ...DEFAULT_PROFILES };
-            try {
-                const customProfiles = JSON.parse(this._settings.get_string('custom-profiles'));
-                for (const profile of customProfiles) {
-                    if (profile.id && profile.name)
-                        profiles[profile.id] = profile;
-                }
-            } catch (e) {
-                console.error('Achroma: Bad custom profile data', e);
-            }
-            return profiles;
+        /**
+         * Falls back to the first profile because the selected one can
+         * disappear (deleted in preferences) while it is still stored as
+         * current. Null only when every profile has been deleted.
+         */
+        _getCurrentProfile() {
+            const profiles = loadProfiles(this._settings);
+            const currentId = this._settings.get_string('current-profile');
+            return profiles.find(profile => profile.id === currentId) ?? profiles[0] ?? null;
         }
 
         /**
-         * Falls back to grayscale because the selected profile can disappear
-         * (deleted in preferences) while it is still stored as current.
+         * What is actually on screen: the slider scratch profile if there is
+         * one, otherwise the selected saved profile.
          */
-        _getCurrentProfile() {
-            const profiles = this._getAllProfiles();
-            const currentId = this._settings.get_string('current-profile');
-            return profiles[currentId] || profiles[FALLBACK_PROFILE_ID];
+        _getActiveProfile() {
+            return this._liveProfile ?? this._getCurrentProfile();
         }
 
         // --- Menu ---
@@ -170,19 +183,58 @@ const AchromaToggle = GObject.registerClass(
         _buildMenu() {
             this.menu.removeAll();
             this._profileItems = {};
+            this._sliders = {};
 
-            for (const [id, profile] of Object.entries(this._getAllProfiles())) {
-                const item = this._createProfileItem(id, profile);
-                this._profileItems[id] = item;
+            SLIDERS.forEach(spec => this.menu.addMenuItem(this._createSliderItem(spec)));
+            this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+            const profiles = loadProfiles(this._settings);
+            for (const profile of profiles) {
+                const item = this._createProfileItem(profile);
+                this._profileItems[profile.id] = item;
                 this.menu.addMenuItem(item);
             }
+            if (profiles.length > 0)
+                this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
-            this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
             this._addPreferencesItem();
             this._syncMenuState();
+            this._syncSliders();
         }
 
-        _createProfileItem(id, profile) {
+        _createSliderItem({ property, title, min, max }) {
+            // Not activatable: clicking a row should grab the slider, not
+            // close the menu.
+            const item = new PopupMenu.PopupBaseMenuItem({ activate: false });
+
+            const label = new St.Label({
+                text: title,
+                y_align: Clutter.ActorAlign.CENTER,
+                style: 'min-width: 6.5em;',
+            });
+
+            const slider = new Slider(0);
+            slider.x_expand = true;
+            slider.accessible_name = title;
+            slider.connect('notify::value', () => {
+                if (this._syncingSliders)
+                    return;
+                // Sliders run 0-1; scale back to the property's own range and
+                // round so the stored values stay readable.
+                const value = min + slider.value * (max - min);
+                this._adjustLiveProfile(property, Math.round(value * 100) / 100);
+            });
+
+            // The row owns keyboard focus, so arrow keys must be forwarded.
+            item.connect('key-press-event', (_actor, event) => slider.emit('key-press-event', event));
+
+            item.add_child(label);
+            item.add_child(slider);
+            this._sliders[property] = slider;
+            return item;
+        }
+
+        _createProfileItem(profile) {
             const item = new PopupMenu.PopupMenuItem(profile.name);
 
             // The label expands by default, which would push the check to the
@@ -201,24 +253,32 @@ const AchromaToggle = GObject.registerClass(
             });
             item.add_child(item._selectedIcon);
 
-            item.connect('activate', () => {
-                this._settings.set_string('current-profile', id);
-                // Picking a profile while off turns the effect on, so the
-                // choice is never silently ignored.
-                if (!this.checked) {
-                    this.checked = true;
-                    this._applyCurrentProfile();
-                }
-            });
+            // The menu closes on the 'activate' signal, so the item handles
+            // activation itself without emitting it. That lets the user pick
+            // a profile and keep tuning the sliders without reopening the menu.
+            item.activate = () => this._selectProfile(profile.id);
 
             return item;
         }
 
+        _selectProfile(id) {
+            this._liveProfile = null;
+            // Picking a profile while off turns the effect on, so the
+            // choice is never silently ignored.
+            this.checked = true;
+            this._settings.set_string('current-profile', id);
+            // The setting does not change when re-picking the current
+            // profile, so refresh explicitly to drop slider tweaks.
+            this._refresh();
+        }
+
         _addPreferencesItem() {
-            const item = this.menu.addAction(
-                'Preferences',
-                () => this._extensionObject.openPreferences()
-            );
+            // Closing the toggle's own submenu would leave the quick settings
+            // panel open behind the preferences window, so close the panel.
+            const item = this.menu.addAction('Preferences', () => {
+                Main.panel.closeQuickSettings();
+                this._extensionObject.openPreferences();
+            });
             item.visible = Main.sessionMode.allowSettings;
 
             // Registering with the menu lets GNOME Shell hide the item on the
@@ -227,22 +287,70 @@ const AchromaToggle = GObject.registerClass(
         }
 
         /**
-         * The check mark shows only while the effect is on, so it reflects
-         * what is on screen rather than just what is selected. The subtitle
-         * shows the selection either way, like the Wi-Fi tile does.
+         * The check mark shows only while a saved profile is actually on
+         * screen, so it reflects what is displayed rather than just what is
+         * selected. The subtitle names the active profile either way, like
+         * the Wi-Fi tile does.
          */
         _syncMenuState() {
-            const currentId = this._settings.get_string('current-profile');
+            const current = this._getCurrentProfile();
+            const savedProfileShown = this.checked && !this._liveProfile;
             for (const [id, item] of Object.entries(this._profileItems))
-                item._selectedIcon.visible = this.checked && id === currentId;
+                item._selectedIcon.visible = savedProfileShown && id === current?.id;
 
-            this.subtitle = this._getCurrentProfile()?.name ?? null;
+            this.subtitle = this._getActiveProfile()?.name ?? null;
+        }
+
+        /**
+         * Moves the sliders to the active profile's values. Guarded because
+         * setting a slider fires the same signal as a user drag, which would
+         * otherwise turn every sync into a new scratch profile.
+         */
+        _syncSliders() {
+            const profile = this._getActiveProfile();
+
+            this._syncingSliders = true;
+            for (const { property, min, max } of SLIDERS) {
+                const value = profile?.[property] ?? 0;
+                this._sliders[property].value = Math.clamp((value - min) / (max - min), 0, 1);
+            }
+            this._syncingSliders = false;
+        }
+
+        _refresh() {
+            this._syncMenuState();
+            this._syncSliders();
+            this._reapplyIfActive();
         }
 
         // --- Effects ---
 
-        _applyCurrentProfile() {
-            this._applyProfile(this._getCurrentProfile());
+        /**
+         * Starts from the active profile so tweaking one slider keeps the
+         * rest, including the tint, which has no slider of its own.
+         */
+        _adjustLiveProfile(property, value) {
+            const { id, ...base } = this._getActiveProfile() ?? {};
+            this._liveProfile = { ...base, name: LIVE_PROFILE_NAME, [property]: value };
+
+            // Adjusting while off turns the effect on, otherwise the drag
+            // would appear to do nothing.
+            this.checked = true;
+            this._syncMenuState();
+            this._reapplyIfActive();
+        }
+
+        /**
+         * While previewing, the preview owns the screen; applying the active
+         * profile would flicker over it.
+         */
+        _reapplyIfActive() {
+            if (this.checked && !this._isPreviewing())
+                this._applyActiveProfile();
+        }
+
+        _applyActiveProfile() {
+            this._applyProfile(this._getActiveProfile());
         }
 
         _applyPreviewProfile() {
@@ -261,6 +369,8 @@ const AchromaToggle = GObject.registerClass(
          */
         _applyProfile(profile) {
             this._clearEffects();
+            if (!profile)
+                return;
 
             const uiGroup = Main.uiGroup;
 

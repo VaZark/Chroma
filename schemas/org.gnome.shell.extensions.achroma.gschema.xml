@@ -6,10 +6,10 @@
       <summary>Current Profile</summary>
       <description>The currently selected monochrome profile</description>
     </key>
-    <key name="custom-profiles" type="s">
-      <default>'[]'</default>
-      <summary>Custom User Profiles</summary>
-      <description>JSON string containing user defined profiles</description>
+    <key name="profiles" type="s">
+      <default>''</default>
+      <summary>Saved Profiles</summary>
+      <description>JSON list of all profiles. Empty means never saved, so the built-in defaults are used.</description>
     </key>
     <key name="is-previewing" type="b">
       <default>false</default>

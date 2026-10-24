@@ -7,7 +7,13 @@ import GLib from 'gi://GLib';
 
 import { ExtensionPreferences } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
-import { DEFAULT_PROFILES, BRIGHTNESS_LIMIT, CONTRAST_LIMIT, TINT_INTENSITY_LIMIT } from './profiles.js';
+import {
+    BRIGHTNESS_LIMIT,
+    CONTRAST_LIMIT,
+    TINT_INTENSITY_LIMIT,
+    loadProfiles,
+    saveProfiles,
+} from './profiles.js';
 
 // Slider drags fire many events per second and every preview update is a
 // settings write the shell must react to, so updates are batched.
@@ -30,11 +36,11 @@ export default class AchromaPreferences extends ExtensionPreferences {
         });
         window.add(page);
 
-        const customGroup = new Adw.PreferencesGroup({
-            title: 'Custom Profiles',
-            description: 'Create your own display effects',
+        const profilesGroup = new Adw.PreferencesGroup({
+            title: 'Profiles',
+            description: 'Create, edit or remove display effects',
         });
-        page.add(customGroup);
+        page.add(profilesGroup);
 
         const selectionGroup = new Adw.PreferencesGroup({
             title: 'Active Profile',
@@ -46,33 +52,20 @@ export default class AchromaPreferences extends ExtensionPreferences {
         selectionGroup.add(comboRow);
 
         const refreshProfiles = () => {
-            this._populateCustomProfileRows(window, settings, customGroup, refreshProfiles);
+            this._populateProfileRows(window, settings, profilesGroup, refreshProfiles);
             this._populateProfileCombo(settings, comboRow);
         };
         refreshProfiles();
 
         comboRow.connect('notify::selected', () => {
-            const model = comboRow.get_model();
-            if (!model)
+            // Repopulating resets the selection, which must not be mistaken
+            // for the user picking the first profile.
+            if (comboRow._populating)
                 return;
-            const item = model.get_item(comboRow.get_selected());
-            if (item)
-                settings.set_string('current-profile', item.get_string());
+            const id = comboRow._profileIds[comboRow.get_selected()];
+            if (id)
+                settings.set_string('current-profile', id);
         });
-    }
-
-    // --- Profile storage ---
-
-    _getCustomProfiles(settings) {
-        try {
-            return JSON.parse(settings.get_string('custom-profiles'));
-        } catch (e) {
-            return [];
-        }
-    }
-
-    _saveCustomProfiles(settings, profiles) {
-        settings.set_string('custom-profiles', JSON.stringify(profiles));
     }
 
     // --- Profile list ---
@@ -82,7 +75,7 @@ export default class AchromaPreferences extends ExtensionPreferences {
      * way to clear its children, so stale rows must be removed individually
      * before the list is rebuilt.
      */
-    _populateCustomProfileRows(window, settings, group, onChange) {
+    _populateProfileRows(window, settings, group, onChange) {
         (group._achromaRows ?? []).forEach(row => group.remove(row));
         group._achromaRows = [];
 
@@ -91,14 +84,22 @@ export default class AchromaPreferences extends ExtensionPreferences {
             group._achromaRows.push(row);
         };
 
-        this._getCustomProfiles(settings).forEach((profile, index) => {
-            addRow(this._createProfileRow(settings, profile, index, onChange));
+        loadProfiles(settings).forEach(profile => {
+            addRow(this._createProfileRow(window, settings, profile, onChange));
         });
         addRow(this._createNewProfileRow(window, settings, onChange));
     }
 
-    _createProfileRow(settings, profile, index, onChange) {
+    _createProfileRow(window, settings, profile, onChange) {
         const row = new Adw.ActionRow({ title: profile.name });
+
+        const editButton = new Gtk.Button({
+            icon_name: 'document-edit-symbolic',
+            valign: Gtk.Align.CENTER,
+        });
+        editButton.add_css_class('flat');
+        editButton.connect('clicked', () => this._openProfileEditor(window, settings, profile, onChange));
+        row.add_suffix(editButton);
 
         const deleteButton = new Gtk.Button({
             icon_name: 'user-trash-symbolic',
@@ -108,9 +109,7 @@ export default class AchromaPreferences extends ExtensionPreferences {
         deleteButton.connect('clicked', () => {
             // Re-read instead of reusing the list captured at build time, which
             // may be stale if another change happened since the rows were drawn.
-            const profiles = this._getCustomProfiles(settings);
-            profiles.splice(index, 1);
-            this._saveCustomProfiles(settings, profiles);
+            saveProfiles(settings, loadProfiles(settings).filter(p => p.id !== profile.id));
             onChange();
         });
         row.add_suffix(deleteButton);
@@ -125,30 +124,28 @@ export default class AchromaPreferences extends ExtensionPreferences {
             activatable: true,
         });
         row.add_prefix(new Gtk.Image({ icon_name: 'list-add-symbolic' }));
-        row.connect('activated', () => this._openProfileCreator(window, settings, onChange));
+        row.connect('activated', () => this._openProfileEditor(window, settings, null, onChange));
         return row;
     }
 
     _populateProfileCombo(settings, comboRow) {
-        const model = new Gtk.StringList();
-        Object.keys(DEFAULT_PROFILES).forEach(id => model.append(id));
-        this._getCustomProfiles(settings).forEach(profile => model.append(profile.id));
-        comboRow.set_model(model);
+        const profiles = loadProfiles(settings);
+        const currentId = settings.get_string('current-profile');
+
+        // The model shows names, but selection is by id, so the two are kept
+        // in step through a parallel list.
+        comboRow._profileIds = profiles.map(profile => profile.id);
+
+        comboRow._populating = true;
+        comboRow.set_model(Gtk.StringList.new(profiles.map(profile => profile.name)));
 
         // Fall back to the first entry when the stored profile no longer
         // exists, so the combo never shows an empty selection.
-        const currentId = settings.get_string('current-profile');
-        let selectedIndex = 0;
-        for (let i = 0; i < model.get_n_items(); i++) {
-            if (model.get_string(i) === currentId) {
-                selectedIndex = i;
-                break;
-            }
-        }
-        comboRow.set_selected(selectedIndex);
+        comboRow.set_selected(Math.max(0, comboRow._profileIds.indexOf(currentId)));
+        comboRow._populating = false;
     }
 
-    // --- Profile creator dialog ---
+    // --- Profile editor dialog ---
 
     /**
      * Live preview works by flipping `is-previewing` and streaming the draft
@@ -156,14 +153,14 @@ export default class AchromaPreferences extends ExtensionPreferences {
      * must be cleared on every exit path, otherwise the shell keeps showing
      * the draft instead of the saved profile.
      */
-    _openProfileCreator(parentWindow, settings, onSaved) {
+    _openProfileEditor(parentWindow, settings, existingProfile, onSaved) {
         settings.set_boolean('is-previewing', true);
 
         try {
             const dialog = new Gtk.Window({
                 transient_for: parentWindow,
                 modal: true,
-                title: 'Create Custom Profile',
+                title: existingProfile ? 'Edit Profile' : 'Create Profile',
                 default_width: 450,
                 default_height: 600,
                 resizable: false,
@@ -173,12 +170,12 @@ export default class AchromaPreferences extends ExtensionPreferences {
                 return false;
             });
 
-            const controls = this._buildProfileControls();
+            const controls = this._buildProfileControls(existingProfile ?? {});
             const pushPreview = this._createThrottledPreview(settings, controls);
 
             this._connectPreviewListeners(controls, pushPreview);
 
-            const actionBar = this._buildActionBar(dialog, settings, controls, onSaved);
+            const actionBar = this._buildActionBar(dialog, settings, controls, existingProfile, onSaved);
             const root = new Gtk.Box({ orientation: Gtk.Orientation.VERTICAL });
             root.append(this._wrapInScroller(controls.container));
             root.append(actionBar);
@@ -213,7 +210,7 @@ export default class AchromaPreferences extends ExtensionPreferences {
         return { row, scale };
     }
 
-    _buildProfileControls() {
+    _buildProfileControls(initial) {
         const container = new Gtk.Box({
             orientation: Gtk.Orientation.VERTICAL,
             spacing: 12,
@@ -224,27 +221,27 @@ export default class AchromaPreferences extends ExtensionPreferences {
         });
 
         const nameGroup = new Adw.PreferencesGroup();
-        const nameEntry = new Adw.EntryRow({ title: 'Profile Name' });
+        const nameEntry = new Adw.EntryRow({ title: 'Profile Name', text: initial.name ?? '' });
         nameGroup.add(nameEntry);
         container.append(nameGroup);
 
         const saturationGroup = new Adw.PreferencesGroup({ title: 'Saturation' });
-        const saturation = this._createSliderRow('Desaturation Level', { min: 0, max: 1, step: 0.05, value: 1 });
+        const saturation = this._createSliderRow('Desaturation Level', { min: 0, max: 1, step: 0.05, value: initial.factor ?? 1 });
         saturationGroup.add(saturation.row);
         container.append(saturationGroup);
 
         const exposureGroup = new Adw.PreferencesGroup({ title: 'Exposure' });
-        const brightness = this._createSliderRow('Brightness', { min: -BRIGHTNESS_LIMIT, max: BRIGHTNESS_LIMIT, step: 0.05, value: 0 });
-        const contrast = this._createSliderRow('Contrast', { min: -CONTRAST_LIMIT, max: CONTRAST_LIMIT, step: 0.05, value: 0 });
+        const brightness = this._createSliderRow('Brightness', { min: -BRIGHTNESS_LIMIT, max: BRIGHTNESS_LIMIT, step: 0.05, value: initial.brightness ?? 0 });
+        const contrast = this._createSliderRow('Contrast', { min: -CONTRAST_LIMIT, max: CONTRAST_LIMIT, step: 0.05, value: initial.contrast ?? 0 });
         exposureGroup.add(brightness.row);
         exposureGroup.add(contrast.row);
         container.append(exposureGroup);
 
         const tintGroup = new Adw.PreferencesGroup({ title: 'Color Tint' });
-        const tintSwitch = new Adw.SwitchRow({ title: 'Enable Color Tint' });
-        const tintColor = this._createTintColorRow();
+        const tintSwitch = new Adw.SwitchRow({ title: 'Enable Color Tint', active: Boolean(initial.tint) });
+        const tintColor = this._createTintColorRow(initial.tint);
         const tintIntensity = this._createSliderRow('Tint Intensity', {
-            min: 0, max: TINT_INTENSITY_LIMIT, step: 5, value: DEFAULT_TINT_INTENSITY,
+            min: 0, max: TINT_INTENSITY_LIMIT, step: 5, value: initial.tint?.a ?? DEFAULT_TINT_INTENSITY,
         });
         tintGroup.add(tintSwitch);
         tintGroup.add(tintColor.row);
@@ -273,9 +270,16 @@ export default class AchromaPreferences extends ExtensionPreferences {
         };
     }
 
-    _createTintColorRow() {
+    _createTintColorRow(tint) {
         const rgba = new Gdk.RGBA();
-        rgba.parse(DEFAULT_TINT_COLOR);
+        if (tint) {
+            rgba.red = tint.r / 255;
+            rgba.green = tint.g / 255;
+            rgba.blue = tint.b / 255;
+            rgba.alpha = 1;
+        } else {
+            rgba.parse(DEFAULT_TINT_COLOR);
+        }
 
         const button = new Gtk.ColorDialogButton({
             dialog: new Gtk.ColorDialog({ with_alpha: true }),
@@ -335,7 +339,7 @@ export default class AchromaPreferences extends ExtensionPreferences {
         controls.tintSwitch.connect('notify::active', pushPreview);
     }
 
-    _buildActionBar(dialog, settings, controls, onSaved) {
+    _buildActionBar(dialog, settings, controls, existingProfile, onSaved) {
         const actionBar = new Gtk.ActionBar();
 
         const cancelButton = new Gtk.Button({ label: 'Cancel' });
@@ -346,7 +350,7 @@ export default class AchromaPreferences extends ExtensionPreferences {
         // stays disabled until a name is entered.
         const saveButton = new Gtk.Button({ label: 'Save Profile' });
         saveButton.add_css_class('suggested-action');
-        saveButton.set_sensitive(false);
+        saveButton.set_sensitive(controls.nameEntry.get_text().length > 0);
         controls.nameEntry.connect('notify::text', () => {
             saveButton.set_sensitive(controls.nameEntry.get_text().length > 0);
         });
@@ -356,14 +360,21 @@ export default class AchromaPreferences extends ExtensionPreferences {
             if (!name)
                 return;
 
-            const profiles = this._getCustomProfiles(settings);
-            profiles.push({
-                id: this._generateProfileId(),
+            const profile = {
+                id: existingProfile?.id ?? this._generateProfileId(),
                 name,
-                type: 'custom',
                 ...this._readProfile(controls),
-            });
-            this._saveCustomProfiles(settings, profiles);
+            };
+
+            // Re-read so edits made elsewhere while the dialog was open
+            // are not overwritten by a stale copy.
+            const profiles = loadProfiles(settings);
+            const index = profiles.findIndex(p => p.id === profile.id);
+            if (index >= 0)
+                profiles[index] = profile;
+            else
+                profiles.push(profile);
+            saveProfiles(settings, profiles);
 
             // destroy() bypasses the close-request handler that normally clears
             // the flag, so it has to be cleared here.
