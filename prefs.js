@@ -22,7 +22,7 @@ const PREVIEW_THROTTLE_MS = 30;
 const DEFAULT_TINT_COLOR = 'rgba(255, 220, 180, 1)';
 const DEFAULT_TINT_INTENSITY = 40;
 
-export default class AchromaPreferences extends ExtensionPreferences {
+export default class ChromaPreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
         const settings = this.getSettings();
 
@@ -76,12 +76,12 @@ export default class AchromaPreferences extends ExtensionPreferences {
      * before the list is rebuilt.
      */
     _populateProfileRows(window, settings, group, onChange) {
-        (group._achromaRows ?? []).forEach(row => group.remove(row));
-        group._achromaRows = [];
+        (group._chromaRows ?? []).forEach(row => group.remove(row));
+        group._chromaRows = [];
 
         const addRow = row => {
             group.add(row);
-            group._achromaRows.push(row);
+            group._chromaRows.push(row);
         };
 
         loadProfiles(settings).forEach(profile => {
@@ -186,7 +186,7 @@ export default class AchromaPreferences extends ExtensionPreferences {
         } catch (e) {
             // If building the UI fails the dialog (and its close handler)
             // never exists, so reset here or the preview would be stuck on.
-            console.error('Achroma Preferences Error:', e);
+            console.error('Chroma Preferences Error:', e);
             settings.set_boolean('is-previewing', false);
         }
     }

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <schemalist>
-  <schema id="org.gnome.shell.extensions.achroma" path="/org/gnome/shell/extensions/achroma/">
+  <schema id="org.gnome.shell.extensions.chroma" path="/org/gnome/shell/extensions/chroma/">
     <key name="current-profile" type="s">
       <default>'grayscale'</default>
       <summary>Current Profile</summary>

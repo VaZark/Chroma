@@ -47,7 +47,7 @@ export function loadProfiles(settings) {
     try {
         return parseProfiles(stored);
     } catch (e) {
-        console.error('Achroma: Bad profile data', e);
+        console.error('Chroma: Bad profile data', e);
         return cloneDefaultProfiles();
     }
 }

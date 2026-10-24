@@ -18,9 +18,9 @@ const ICON_NAME = 'applications-graphics-symbolic';
 
 // Effects are registered by name so each one can be removed without
 // disturbing effects that belong to other extensions on the same actor.
-const EFFECT_DESATURATE = 'achroma-effect-desat';
-const EFFECT_BRIGHTNESS_CONTRAST = 'achroma-effect-bc';
-const EFFECT_TINT = 'achroma-effect-tint';
+const EFFECT_DESATURATE = 'chroma-effect-desat';
+const EFFECT_BRIGHTNESS_CONTRAST = 'chroma-effect-bc';
+const EFFECT_TINT = 'chroma-effect-tint';
 
 // Below this a brightness/contrast change is invisible, so the effect is skipped.
 const BRIGHTNESS_CONTRAST_EPSILON = 0.001;
@@ -37,8 +37,8 @@ const BRIGHTNESS_CONTRAST_EPSILON = 0.001;
  * snippet text would freeze the first values ever used, and later changes
  * (such as the intensity slider) would have no visible effect.
  */
-const TintEffect = GObject.registerClass(
-    class TintEffect extends Clutter.ShaderEffect {
+const ChromaTintEffect = GObject.registerClass(
+    class ChromaTintEffect extends Clutter.ShaderEffect {
         _init({ tint }) {
             super._init();
             this._setFloatUniform('tint_r', tint.r / 255);
@@ -55,8 +55,8 @@ const TintEffect = GObject.registerClass(
         }
 
         vfunc_get_static_snippet() {
-            if (!TintEffect._snippet) {
-                TintEffect._snippet = Cogl.Snippet.new(
+            if (!ChromaTintEffect._snippet) {
+                ChromaTintEffect._snippet = Cogl.Snippet.new(
                     Cogl.SnippetHook.FRAGMENT,
                     `uniform float tint_r;
                      uniform float tint_g;
@@ -68,7 +68,7 @@ const TintEffect = GObject.registerClass(
                         tint_amount);`
                 );
             }
-            return TintEffect._snippet;
+            return ChromaTintEffect._snippet;
         }
     });
 
@@ -82,11 +82,11 @@ const SLIDERS = [
 
 const LIVE_PROFILE_NAME = 'Custom';
 
-const AchromaToggle = GObject.registerClass(
-    class AchromaToggle extends QuickSettings.QuickMenuToggle {
+const ChromaToggle = GObject.registerClass(
+    class ChromaToggle extends QuickSettings.QuickMenuToggle {
         _init(extensionObject) {
             super._init({
-                title: 'Achroma',
+                title: 'Chroma',
                 iconName: ICON_NAME,
                 toggleMode: true,
             });
@@ -106,7 +106,7 @@ const AchromaToggle = GObject.registerClass(
             // could otherwise leave the screen altered with the toggle out of sync.
             this.checked = false;
 
-            this.menu.setHeader(ICON_NAME, 'Achroma', null);
+            this.menu.setHeader(ICON_NAME, 'Chroma', null);
 
             this.connect('clicked', () => {
                 if (this.checked)
@@ -358,7 +358,7 @@ const AchromaToggle = GObject.registerClass(
                 const profile = JSON.parse(this._settings.get_string('preview-profile'));
                 this._applyProfile(profile);
             } catch (e) {
-                console.error('Achroma: Bad preview data', e);
+                console.error('Chroma: Bad preview data', e);
             }
         }
 
@@ -396,7 +396,7 @@ const AchromaToggle = GObject.registerClass(
 
             if (profile.tint && profile.tint.a > 0) {
                 const tint = { ...profile.tint, a: Math.min(profile.tint.a, TINT_INTENSITY_LIMIT) };
-                uiGroup.add_effect_with_name(EFFECT_TINT, new TintEffect({ tint }));
+                uiGroup.add_effect_with_name(EFFECT_TINT, new ChromaTintEffect({ tint }));
             }
         }
 
@@ -424,15 +424,15 @@ const AchromaToggle = GObject.registerClass(
 /**
  * Wraps the toggle so the panel shows an icon whenever the effect is on.
  */
-const AchromaSystemIndicator = GObject.registerClass(
-    class AchromaSystemIndicator extends QuickSettings.SystemIndicator {
+const ChromaSystemIndicator = GObject.registerClass(
+    class ChromaSystemIndicator extends QuickSettings.SystemIndicator {
         constructor(extensionObject) {
             super();
 
             this._indicator = this._addIndicator();
             this._indicator.iconName = ICON_NAME;
 
-            const toggle = new AchromaToggle(extensionObject);
+            const toggle = new ChromaToggle(extensionObject);
             toggle.bind_property(
                 'checked',
                 this._indicator,
@@ -443,9 +443,9 @@ const AchromaSystemIndicator = GObject.registerClass(
         }
     });
 
-export default class AchromaExtension extends Extension {
+export default class ChromaExtension extends Extension {
     enable() {
-        this._indicator = new AchromaSystemIndicator(this);
+        this._indicator = new ChromaSystemIndicator(this);
         Main.panel.statusArea.quickSettings.addExternalIndicator(this._indicator);
     }
 
