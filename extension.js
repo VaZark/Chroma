@@ -262,6 +262,17 @@ const ChromaToggle = GObject.registerClass(
         }
 
         _selectProfile(id) {
+            // Clicking the profile that is already on screen turns it off. A
+            // Custom profile does not count: clicking the saved profile then
+            // should bring it back, not switch the effect off.
+            const isShowing = this.checked && !this._liveProfile &&
+                id === this._getCurrentProfile()?.id;
+            if (isShowing) {
+                this.checked = false;
+                this._clearEffects();
+                return;
+            }
+
             this._liveProfile = null;
             // Picking a profile while off turns the effect on, so the
             // choice is never silently ignored.
