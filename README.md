@@ -42,9 +42,7 @@ The quick settings menu has Desaturation, Brightness and Contrast sliders. Movin
    glib-compile-schemas ~/.local/share/gnome-shell/extensions/chroma@vazark.github.io/schemas/
    ```
 
-4. Restart GNOME Shell: 
-   - On Wayland: Log out and log back in
-   - On X11: Press `Alt+F2`, type `r`, press Enter
+4. Log out and log back in so GNOME Shell picks up the new extension.
 
 5. Enable the extension:
    ```bash
@@ -80,7 +78,7 @@ gnome-extensions disable chroma@vazark.github.io && gnome-extensions enable chro
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a pull request or open an issue. 
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and how to test changes.
 
 ## Credits
 
